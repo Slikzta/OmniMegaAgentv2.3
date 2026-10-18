@@ -19,8 +19,12 @@ jobs:
 
       - name: Install Node Dependencies
         run: |
+          if [ ! -f package.json ]; then
+            echo "::error::package.json is missing from repository root! Please ensure package.json and project source files are pushed to the repository."
+            exit 1
+          fi
           if [ -f package-lock.json ]; then
-            npm ci
+            npm ci || npm install
           else
             npm install
           fi
@@ -29,6 +33,8 @@ jobs:
         run: |
           if [ -f android/app/debug.keystore.base64 ]; then
             base64 -d android/app/debug.keystore.base64 > android/app/debug.keystore
+          elif [ -f debug.keystore.base64 ]; then
+            base64 -d debug.keystore.base64 > android/app/debug.keystore
           fi
 
       - name: Run Lint and Unit Tests
