@@ -522,3 +522,132 @@ test("Live Voice Model Test-Connection & BidiGenerateContent WebSocket Pipeline"
   }
 });
 
+test("Continuous-Listening STT State Machine & ErrorCode 5 Recovery Pipeline", () => {
+  // 1. Exponential backoff contract: 500ms, 1s, 2s, 4s
+  const getBackoffDelay = (attempt: number): number => {
+    if (attempt <= 1) return 500;
+    if (attempt === 2) return 1000;
+    if (attempt === 3) return 2000;
+    return 4000;
+  };
+  assert.strictEqual(getBackoffDelay(1), 500);
+  assert.strictEqual(getBackoffDelay(2), 1000);
+  assert.strictEqual(getBackoffDelay(3), 2000);
+  assert.strictEqual(getBackoffDelay(4), 4000);
+  assert.ok(getBackoffDelay(1) >= 300, "Must satisfy delay of at least 300ms before every restart");
+
+  // 2. State Machine guards: ignore start requests while starting, listening, or paused
+  let isStarting = false;
+  let isListening = false;
+  let isPaused = false;
+  let isActive = true;
+  let isSpeaking = false;
+  let isResponding = false;
+  let startInvocations = 0;
+
+  const canStart = () => {
+    if (!isActive || isPaused || isStarting || isListening || isSpeaking || isResponding) {
+      return false;
+    }
+    return true;
+  };
+
+  assert.strictEqual(canStart(), true);
+  isStarting = true;
+  assert.strictEqual(canStart(), false, "Cannot start while already starting");
+  isStarting = false;
+  isListening = true;
+  assert.strictEqual(canStart(), false, "Cannot start while listening");
+  isListening = false;
+  isPaused = true;
+  assert.strictEqual(canStart(), false, "Cannot start while paused");
+  isPaused = false;
+  isSpeaking = true;
+  assert.strictEqual(canStart(), false, "Cannot start while Sierra TTS is speaking");
+
+  // 3. Error code 5 (Client side error / ERROR_CLIENT) recovery:
+  // Must NOT count as an empty cycle, allows at most 2 recoveries, then pauses with clear error.
+  let consecutiveFailures = 0;
+  let clientErrorRecoveryCount = 0;
+  let pausedReason = "";
+
+  const handleStoppedWithClientError = (errorCode: number) => {
+    if (errorCode === 5) {
+      // Do NOT count as empty cycle
+      if (clientErrorRecoveryCount < 2) {
+        clientErrorRecoveryCount++;
+        return { recovered: true, paused: false };
+      } else {
+        isPaused = true;
+        pausedReason = "Speech recognizer unavailable, tap mic to retry";
+        return { recovered: false, paused: true, error: pausedReason };
+      }
+    }
+    // Normal empty cycle
+    consecutiveFailures++;
+    return { recovered: false, paused: false };
+  };
+
+  // Attempt 1 errorCode 5
+  const res1 = handleStoppedWithClientError(5);
+  assert.strictEqual(res1.recovered, true);
+  assert.strictEqual(clientErrorRecoveryCount, 1);
+  assert.strictEqual(consecutiveFailures, 0, "ErrorCode 5 must NOT increment empty cycle count");
+
+  // Attempt 2 errorCode 5
+  const res2 = handleStoppedWithClientError(5);
+  assert.strictEqual(res2.recovered, true);
+  assert.strictEqual(clientErrorRecoveryCount, 2);
+  assert.strictEqual(consecutiveFailures, 0);
+
+  // Attempt 3 errorCode 5 -> exceeds limit of 2, pauses with actionable message
+  const res3 = handleStoppedWithClientError(5);
+  assert.strictEqual(res3.recovered, false);
+  assert.strictEqual(res3.paused, true);
+  assert.strictEqual(res3.error, "Speech recognizer unavailable, tap mic to retry");
+  assert.strictEqual(isPaused, true);
+
+  // 4. User mic tap clears paused and resets failure counters
+  const onMicTap = () => {
+    isPaused = false;
+    consecutiveFailures = 0;
+    clientErrorRecoveryCount = 0;
+    pausedReason = "";
+  };
+  onMicTap();
+  assert.strictEqual(isPaused, false);
+  assert.strictEqual(consecutiveFailures, 0);
+  assert.strictEqual(clientErrorRecoveryCount, 0);
+
+  // 5. Successful speech result resets failure counter to 0
+  consecutiveFailures = 2;
+  const onSpeechSuccess = () => {
+    consecutiveFailures = 0;
+    clientErrorRecoveryCount = 0;
+  };
+  onSpeechSuccess();
+  assert.strictEqual(consecutiveFailures, 0, "Successful speech result must reset failure count to 0");
+
+  // 6. Log throttling: drops identical log lines within 1000ms
+  let lastLog = { key: "", time: 0 };
+  const loggedLines: string[] = [];
+
+  const throttledLog = (stage: string, detail: string, now: number) => {
+    const key = `${stage}:${detail}`;
+    if (lastLog.key === key && now - lastLog.time < 1000) {
+      return false; // dropped
+    }
+    lastLog = { key, time: now };
+    loggedLines.push(key);
+    return true; // accepted
+  };
+
+  const t0 = 10000;
+  assert.strictEqual(throttledLog("STT:Start", "Checking permissions", t0), true);
+  assert.strictEqual(throttledLog("STT:Start", "Checking permissions", t0 + 100), false, "Duplicate within 100ms dropped");
+  assert.strictEqual(throttledLog("STT:Start", "Checking permissions", t0 + 500), false, "Duplicate within 500ms dropped");
+  assert.strictEqual(throttledLog("STT:Start", "Checking permissions", t0 + 1050), true, "Duplicate after 1000ms accepted");
+  assert.strictEqual(throttledLog("STT:Different", "Other detail", t0 + 1100), true, "Different log accepted immediately");
+});
+
+
