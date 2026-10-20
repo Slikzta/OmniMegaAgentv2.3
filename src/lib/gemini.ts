@@ -31,6 +31,187 @@ export const LIVE_VOICE_MODELS = [
 export const DEFAULT_LIVE_WEBSOCKET_URL =
   'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
 
+export function isGeminiLiveModel(model?: string): boolean {
+  if (!model) return false;
+  const m = model.toLowerCase().trim();
+  return (
+    m === 'gemini-3.8-live' ||
+    m === 'gemini-3.8-live-extended-thinking' ||
+    m === 'models/gemini-3.8-live' ||
+    m === 'models/gemini-3.8-live-extended-thinking' ||
+    m.includes('-live') ||
+    m.includes('live')
+  );
+}
+
+export async function testGeminiLiveWebSocket(params: {
+  apiKey: string;
+  model: string;
+  liveWsUrl?: string;
+  timeoutMs?: number;
+}): Promise<{ success: boolean; latencyMs: number; message?: string; error?: string }> {
+  const startTime = Date.now();
+  const timeoutMs = params.timeoutMs ?? 10000;
+  const targetModel = params.model || 'gemini-3.8-live';
+  const formattedModel = targetModel.startsWith('models/') ? targetModel : `models/${targetModel}`;
+
+  const baseEndpoint = (params.liveWsUrl && params.liveWsUrl.trim())
+    ? params.liveWsUrl.trim()
+    : DEFAULT_LIVE_WEBSOCKET_URL;
+
+  let wsUrl = baseEndpoint;
+  if (!wsUrl.includes('key=')) {
+    const separator = wsUrl.includes('?') ? '&' : '?';
+    wsUrl = `${wsUrl}${separator}key=${encodeURIComponent(params.apiKey)}`;
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let ws: any = null;
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      if (ws) {
+        try {
+          ws.onopen = null;
+          ws.onmessage = null;
+          ws.onerror = null;
+          ws.onclose = null;
+          if (ws.readyState === (ws.OPEN || 1) || ws.readyState === (ws.CONNECTING || 0)) {
+            ws.close();
+          }
+        } catch (_) {}
+      }
+    };
+
+    const finish = (result: { success: boolean; latencyMs: number; message?: string; error?: string }) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => {
+      finish({
+        success: false,
+        latencyMs: Date.now() - startTime,
+        error: `WebSocket connection timed out after ${timeoutMs}ms while connecting to live endpoint.`,
+      });
+    }, timeoutMs);
+
+    try {
+      const WebSocketClass = typeof WebSocket !== 'undefined' ? WebSocket : (globalThis as any).WebSocket;
+      if (!WebSocketClass) {
+        finish({
+          success: false,
+          latencyMs: Date.now() - startTime,
+          error: 'WebSocket API is not supported in this runtime environment.',
+        });
+        return;
+      }
+
+      ws = new WebSocketClass(wsUrl);
+
+      ws.onopen = () => {
+        // Send Gemini Live BidiGenerateContent setup payload
+        const setupMessage = {
+          setup: {
+            model: formattedModel,
+          },
+        };
+        try {
+          ws.send(JSON.stringify(setupMessage));
+        } catch (sendErr: any) {
+          finish({
+            success: false,
+            latencyMs: Date.now() - startTime,
+            error: `Failed to send setup message over WebSocket: ${sendErr?.message || sendErr}`,
+          });
+        }
+      };
+
+      ws.onmessage = async (event: any) => {
+        const latencyMs = Date.now() - startTime;
+        let dataStr = '';
+        try {
+          if (typeof event.data === 'string') {
+            dataStr = event.data;
+          } else if (event.data instanceof Blob) {
+            dataStr = await event.data.text();
+          } else if (event.data instanceof ArrayBuffer) {
+            dataStr = new TextDecoder().decode(event.data);
+          } else if (typeof Buffer !== 'undefined' && Buffer.isBuffer(event.data)) {
+            dataStr = event.data.toString('utf-8');
+          } else if (event.data && typeof event.data.toString === 'function') {
+            dataStr = event.data.toString();
+          }
+
+          const parsed = JSON.parse(dataStr);
+          if (parsed.setupComplete !== undefined || parsed.serverContent !== undefined || parsed.toolCall !== undefined) {
+            finish({
+              success: true,
+              latencyMs,
+              message: `Successfully connected to Gemini Live (${targetModel}) via WebSocket (setup acknowledged in ${latencyMs}ms).`,
+            });
+            return;
+          }
+
+          if (parsed.error) {
+            const errMsg = parsed.error.message || JSON.stringify(parsed.error);
+            finish({
+              success: false,
+              latencyMs,
+              error: `Gemini Live error: ${errMsg}`,
+            });
+            return;
+          }
+
+          finish({
+            success: true,
+            latencyMs,
+            message: `Successfully connected to Gemini Live (${targetModel}) via WebSocket.`,
+          });
+        } catch (_) {
+          finish({
+            success: true,
+            latencyMs,
+            message: `Connected to Gemini Live WebSocket (${targetModel}).`,
+          });
+        }
+      };
+
+      ws.onerror = (err: any) => {
+        const latencyMs = Date.now() - startTime;
+        const msg = err?.message || (err?.error ? String(err.error) : 'WebSocket network error');
+        finish({
+          success: false,
+          latencyMs,
+          error: `WebSocket error connecting to ${baseEndpoint}: ${msg}`,
+        });
+      };
+
+      ws.onclose = (event: any) => {
+        const latencyMs = Date.now() - startTime;
+        if (!settled) {
+          const reason = event?.reason ? ` Reason: ${event.reason}` : '';
+          const code = event?.code !== undefined ? ` (code ${event.code})` : '';
+          finish({
+            success: false,
+            latencyMs,
+            error: `WebSocket closed before setup completed${code}.${reason}`,
+          });
+        }
+      };
+    } catch (initErr: any) {
+      finish({
+        success: false,
+        latencyMs: Date.now() - startTime,
+        error: `Could not initiate WebSocket connection: ${initErr?.message || initErr}`,
+      });
+    }
+  });
+}
+
 
 export const ASPECT_RATIOS = ["1:1", "3:4", "4:3", "9:16", "16:9", "1:4", "1:8", "4:1", "8:1"] as const;
 export const IMAGE_SIZES = ["512px", "1K", "2K", "4K"] as const;

@@ -423,3 +423,102 @@ test("Native Text-to-Speech Integration and Lifecycle Contracts", async () => {
   );
 });
 
+test("Live Voice Model Test-Connection & BidiGenerateContent WebSocket Pipeline", async () => {
+  const { isGeminiLiveModel, testGeminiLiveWebSocket, DEFAULT_LIVE_WEBSOCKET_URL } = await import("../src/lib/gemini");
+
+  // 1. Verify model classification for Live API
+  assert.strictEqual(isGeminiLiveModel("gemini-3.8-live"), true);
+  assert.strictEqual(isGeminiLiveModel("gemini-3.8-live-extended-thinking"), true);
+  assert.strictEqual(isGeminiLiveModel("gemini-3.1-flash-live-preview"), true);
+  assert.strictEqual(isGeminiLiveModel("gemini-3.5-flash-lite"), false);
+  assert.strictEqual(isGeminiLiveModel("gemini-3-flash-preview"), false);
+  assert.strictEqual(isGeminiLiveModel("gemini-3.1-pro-preview"), false);
+  assert.strictEqual(isGeminiLiveModel("gpt-4o"), false);
+  assert.strictEqual(isGeminiLiveModel(""), false);
+  assert.strictEqual(isGeminiLiveModel(undefined), false);
+
+  // 2. Verify default WebSocket endpoint URL
+  assert.ok(
+    DEFAULT_LIVE_WEBSOCKET_URL.includes("BidiGenerateContent"),
+    "DEFAULT_LIVE_WEBSOCKET_URL must target BidiGenerateContent service"
+  );
+  assert.ok(
+    DEFAULT_LIVE_WEBSOCKET_URL.startsWith("wss://generativelanguage.googleapis.com"),
+    "DEFAULT_LIVE_WEBSOCKET_URL must use wss protocol on generativelanguage host"
+  );
+
+  // 3. Test simulated WebSocket lifecycle with setup message and setupComplete
+  const originalWebSocket = (globalThis as any).WebSocket;
+  let sentPayload: any = null;
+  let connectionUrl = "";
+
+  class MockWebSocket {
+    static OPEN = 1;
+    readyState = 1;
+    onopen: (() => void) | null = null;
+    onmessage: ((ev: any) => void) | null = null;
+    onerror: ((ev: any) => void) | null = null;
+    onclose: ((ev: any) => void) | null = null;
+
+    constructor(url: string) {
+      connectionUrl = url;
+      setTimeout(() => {
+        if (this.onopen) this.onopen();
+      }, 5);
+    }
+
+    send(data: string) {
+      sentPayload = JSON.parse(data);
+      // Simulate Gemini Live server setupComplete acknowledgment
+      setTimeout(() => {
+        if (this.onmessage) {
+          this.onmessage({ data: JSON.stringify({ setupComplete: {} }) });
+        }
+      }, 5);
+    }
+
+    close() {
+      this.readyState = 3;
+      if (this.onclose) {
+        this.onclose({ code: 1000, reason: "Normal closure" });
+      }
+    }
+  }
+
+  (globalThis as any).WebSocket = MockWebSocket;
+
+  try {
+    const result = await testGeminiLiveWebSocket({
+      apiKey: "test-api-key-12345",
+      model: "gemini-3.8-live",
+      timeoutMs: 1000,
+    });
+
+    assert.strictEqual(result.success, true);
+    assert.ok(result.latencyMs >= 0);
+    assert.ok(result.message?.includes("gemini-3.8-live"));
+    assert.ok(connectionUrl.includes("key=test-api-key-12345"));
+    assert.ok(connectionUrl.includes("BidiGenerateContent"));
+    assert.deepStrictEqual(sentPayload, {
+      setup: {
+        model: "models/gemini-3.8-live",
+      },
+    });
+
+    // Test with gemini-3.8-live-extended-thinking
+    const resultThinking = await testGeminiLiveWebSocket({
+      apiKey: "test-api-key-12345",
+      model: "gemini-3.8-live-extended-thinking",
+      timeoutMs: 1000,
+    });
+    assert.strictEqual(resultThinking.success, true);
+    assert.deepStrictEqual(sentPayload, {
+      setup: {
+        model: "models/gemini-3.8-live-extended-thinking",
+      },
+    });
+  } finally {
+    (globalThis as any).WebSocket = originalWebSocket;
+  }
+});
+

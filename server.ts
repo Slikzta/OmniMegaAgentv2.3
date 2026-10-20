@@ -8,6 +8,7 @@ import cookieParser from "cookie-parser";
 import crypto from "crypto";
 import { Octokit } from "octokit";
 import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from "@google/genai";
+import { isGeminiLiveModel, testGeminiLiveWebSocket } from "./src/lib/gemini";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -215,11 +216,12 @@ async function startServer() {
   app.post(["/api/providers/test", "/api/providers/test-connection"], async (req, res) => {
     const sId = getClientSessionId(req);
     const store = getSessionStore(sId);
-    const { providerId, apiKey, model, baseUrl } = req.body;
+    const { providerId, apiKey, model, baseUrl, liveWsUrl } = req.body;
 
     const targetKey = apiKey || store.configs[providerId]?.apiKey || (providerId === "gemini" ? process.env.GEMINI_API_KEY : "");
     const targetModel = model || store.configs[providerId]?.selectedModel;
     const targetBaseUrl = baseUrl || store.configs[providerId]?.baseUrl;
+    const targetLiveWsUrl = liveWsUrl || (providerId === "gemini" ? store.configs[providerId]?.baseUrl : undefined);
 
     const startTime = Date.now();
 
@@ -228,6 +230,17 @@ async function startServer() {
         if (!targetKey) {
           return res.status(400).json({ success: false, error: "Gemini API key is required. Please provide a key or configure GEMINI_API_KEY." });
         }
+
+        // Live voice models (gemini-3.8-live, gemini-3.8-live-extended-thinking, etc.) must connect via WebSocket BidiGenerateContent
+        if (isGeminiLiveModel(targetModel)) {
+          const liveResult = await testGeminiLiveWebSocket({
+            apiKey: targetKey,
+            model: targetModel || "gemini-3.8-live",
+            liveWsUrl: targetLiveWsUrl,
+          });
+          return res.status(liveResult.success ? 200 : 400).json(liveResult);
+        }
+
         const ai = new GoogleGenAI({ apiKey: targetKey });
         const testRes = await ai.models.generateContent({
           model: targetModel || "gemini-3-flash-preview",

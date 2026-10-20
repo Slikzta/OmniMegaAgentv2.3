@@ -1,4 +1,5 @@
 import { Capacitor } from '@capacitor/core';
+import { isGeminiLiveModel, testGeminiLiveWebSocket } from './gemini';
 
 export interface ProviderInfo {
   id: string;
@@ -263,6 +264,7 @@ export async function testProviderConnection(data: {
   apiKey?: string;
   model?: string;
   baseUrl?: string;
+  liveWsUrl?: string;
 }): Promise<{ success: boolean; latencyMs?: number; message?: string; error?: string }> {
   if (Capacitor.isNativePlatform()) {
     const startTime = Date.now();
@@ -274,6 +276,16 @@ export async function testProviderConnection(data: {
         return { success: false, error: "Gemini API key is required. Please provide a key in settings." };
       }
       const model = data.model || "gemini-3.5-flash-lite";
+
+      // Live voice models require BidiGenerateContent via WebSocket
+      if (isGeminiLiveModel(model)) {
+        return await testGeminiLiveWebSocket({
+          apiKey: effectiveKey,
+          model,
+          liveWsUrl: data.liveWsUrl,
+        });
+      }
+
       try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${effectiveKey}`;
         const res = await fetch(url, {
@@ -343,32 +355,47 @@ export async function testProviderConnection(data: {
     };
   }
 
-  const res = await fetch('/api/providers/test', {
-    method: 'POST',
-    headers: { 
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-    },
-    body: JSON.stringify(data),
-  });
+  try {
+    const res = await fetch('/api/providers/test', {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify(data),
+    });
 
-  const contentType = res.headers.get('content-type') || '';
-  if (!contentType.includes('application/json')) {
-    const text = await res.text();
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      const text = await res.text();
+      return {
+        success: false,
+        error: `Server returned non-JSON response (${res.status}): ${text.slice(0, 120)}`,
+      };
+    }
+
+    const json = await res.json();
+    if (!res.ok || !json.success) {
+      return {
+        success: false,
+        latencyMs: json.latencyMs,
+        error: json.error || 'Connection failed',
+      };
+    }
+    return json;
+  } catch (err: any) {
+    if (data.providerId === 'gemini' && isGeminiLiveModel(data.model) && data.apiKey?.trim()) {
+      return await testGeminiLiveWebSocket({
+        apiKey: data.apiKey.trim(),
+        model: data.model || 'gemini-3.8-live',
+        liveWsUrl: data.liveWsUrl,
+      });
+    }
     return {
       success: false,
-      error: `Server returned non-JSON response (${res.status}): ${text.slice(0, 120)}`,
+      error: err.message || 'Connection failed',
     };
   }
-
-  const json = await res.json();
-  if (!res.ok || !json.success) {
-    return {
-      success: false,
-      error: json.error || 'Connection failed',
-    };
-  }
-  return json;
 }
 
 export interface StreamChatParams {

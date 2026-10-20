@@ -195,6 +195,7 @@ export default function SettingsView({ onNavigateToChat }: SettingsProps) {
         apiKey: formKey.trim() || undefined,
         model: modelToUse || undefined,
         baseUrl: formUrl.trim() || undefined,
+        liveWsUrl: liveVoiceWsUrl.trim() || undefined,
       });
 
       setTestResult(result);
